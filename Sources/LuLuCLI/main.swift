@@ -1,4 +1,69 @@
 import Foundation
+import Darwin
+
+// MARK: - Endpoint match type (mirrors LuLu's EndpointType enum)
+
+// Persisted under the legacy key 'isEndpointAddrRegex'. The archived format changed across
+// LuLu releases: <= 4.4.x stored an inline primitive bool, 4.5.0 an inline primitive integer,
+// and >= 4.5.1 an NSNumber object holding an EndpointType. We only ever read it as an object:
+// legacy primitives decode to nil (without throwing) and are then derived from the address.
+// Do NOT use decodeBool/decodeInteger -- either throws on the other's format, which aborts
+// the entire load and loses every rule.
+enum EndpointType: Int {
+    case exact = 0
+    case regex = 1
+    case cidr = 2
+    case glob = 3
+}
+
+// Derive an endpoint's match type from the address itself (mirrors LuLu's endpointTypeForAddress)
+func endpointTypeForAddress(_ address: String?) -> EndpointType {
+    guard let address = address, !address.isEmpty, address != "*" else { return .exact }
+
+    // regex metacharacter?
+    if address.rangeOfCharacter(from: CharacterSet(charactersIn: "\\()[]{}|^$+?")) != nil { return .regex }
+
+    // glob?
+    if address.contains("*") { return .glob }
+
+    // CIDR or IP range?
+    if isAddressRange(address) { return .cidr }
+
+    return .exact
+}
+
+// Byte length of a numeric IP address, or nil if it doesn't parse (mirrors an inet_pton probe)
+func ipByteLength(_ string: String) -> Int? {
+    var bytes = [UInt8](repeating: 0, count: 16)
+    if inet_pton(AF_INET, string, &bytes) == 1 { return 4 }
+    if inet_pton(AF_INET6, string, &bytes) == 1 { return 16 }
+    return nil
+}
+
+// Is a string a valid CIDR or IP range? (mirrors LuLu's isAddressRange)
+// note: a plain single IP is NOT a range by design -- those are exact matches
+func isAddressRange(_ spec: String) -> Bool {
+    // CIDR ("a.b.c.d/n" or IPv6)
+    if let slash = spec.firstIndex(of: "/") {
+        let addr = spec[..<slash].trimmingCharacters(in: .whitespaces)
+        let prefix = spec[spec.index(after: slash)...].trimmingCharacters(in: .whitespaces)
+        guard !prefix.isEmpty, prefix.allSatisfy({ $0.isNumber }),
+              let bits = Int(prefix), let length = ipByteLength(addr),
+              bits >= 0, bits <= length * 8 else { return false }
+        return true
+    }
+
+    // range ("ipA - ipB"; IPv6 uses ':' so '-' is unambiguous)
+    if let dash = spec.firstIndex(of: "-") {
+        let low = spec[..<dash].trimmingCharacters(in: .whitespaces)
+        let high = spec[spec.index(after: dash)...].trimmingCharacters(in: .whitespaces)
+        guard let lowLength = ipByteLength(low), let highLength = ipByteLength(high),
+              lowLength == highLength else { return false }
+        return true
+    }
+
+    return false
+}
 
 // MARK: - Rule class (mirrors LuLu's Rule.m NSSecureCoding)
 
@@ -14,7 +79,7 @@ class Rule: NSObject, NSSecureCoding {
     @objc var csInfo: NSDictionary?
     @objc var endpointAddr: String?
     @objc var endpointHost: String?
-    @objc var isEndpointAddrRegex: Bool = false
+    @objc var isEndpointAddrRegex: NSNumber?
     @objc var endpointPort: String?
     @objc var type: NSNumber?
     @objc var scope: NSNumber?
@@ -33,8 +98,18 @@ class Rule: NSObject, NSSecureCoding {
         path = decoder.decodeObject(of: NSString.self, forKey: "path") as String?
         name = decoder.decodeObject(of: NSString.self, forKey: "name") as String?
         csInfo = decoder.decodeObject(of: [NSDictionary.self, NSArray.self, NSString.self, NSNumber.self], forKey: "csInfo") as? NSDictionary
-        isEndpointAddrRegex = decoder.decodeBool(forKey: "isEndpointAddrRegex")
         endpointAddr = decoder.decodeObject(of: NSString.self, forKey: "endpointAddr") as String?
+
+        // endpoint addr match type {exact, regex, cidr, glob}
+        // newer archives store an object (decodes directly); legacy archives stored an inline
+        // primitive (a bool, then an integer), which 'decodeObject' can't read (nil, no throw),
+        // so fall back to deriving the type from the address itself
+        if let endpointType = decoder.decodeObject(of: NSNumber.self, forKey: "isEndpointAddrRegex") {
+            isEndpointAddrRegex = endpointType
+        } else {
+            isEndpointAddrRegex = NSNumber(value: endpointTypeForAddress(endpointAddr).rawValue)
+        }
+
         endpointHost = decoder.decodeObject(of: NSString.self, forKey: "endpointHost") as String?
         endpointPort = decoder.decodeObject(of: NSString.self, forKey: "endpointPort") as String?
         type = decoder.decodeObject(of: NSNumber.self, forKey: "type")
@@ -52,6 +127,8 @@ class Rule: NSObject, NSSecureCoding {
         encoder.encode(path, forKey: "path")
         encoder.encode(name, forKey: "name")
         encoder.encode(csInfo, forKey: "csInfo")
+        // encode as an object (not a primitive) so it can always be decoded without a
+        // type-mismatch exception (which would abort the decode of *all* rules)
         encoder.encode(isEndpointAddrRegex, forKey: "isEndpointAddrRegex")
         encoder.encode(endpointAddr, forKey: "endpointAddr")
         encoder.encode(endpointHost, forKey: "endpointHost")
@@ -81,6 +158,19 @@ class Rule: NSObject, NSSecureCoding {
         case 4: return "passive"
         case 5: return "recent"
         default: return "unknown(\(type?.intValue ?? -1))"
+        }
+    }
+
+    var endpointType: EndpointType {
+        EndpointType(rawValue: isEndpointAddrRegex?.intValue ?? 0) ?? .exact
+    }
+
+    var matchTypeLabel: String {
+        switch endpointType {
+        case .exact: return ""
+        case .regex: return " [REGEX]"
+        case .cidr: return " [CIDR]"
+        case .glob: return " [GLOB]"
         }
     }
 }
@@ -148,8 +238,7 @@ func listRules(_ rules: NSDictionary, filter: String? = nil) {
         print("[\(key)]")
         for rule in ruleArray {
             let disabled = rule.isDisabled?.boolValue == true ? " [DISABLED]" : ""
-            let regex = rule.isEndpointAddrRegex ? " [REGEX]" : ""
-            print("  \(rule.uuid ?? "no-uuid") | \(rule.actionString) | addr=\(rule.endpointAddr ?? "*") port=\(rule.endpointPort ?? "*") | type=\(rule.typeString)\(disabled)\(regex)")
+            print("  \(rule.uuid ?? "no-uuid") | \(rule.actionString) | addr=\(rule.endpointAddr ?? "*") port=\(rule.endpointPort ?? "*") | type=\(rule.typeString)\(rule.matchTypeLabel)\(disabled)")
             if let p = rule.path, p != key {
                 print("    path=\(p)")
             }
@@ -157,7 +246,7 @@ func listRules(_ rules: NSDictionary, filter: String? = nil) {
     }
 }
 
-func addRule(_ rules: NSMutableDictionary, key: String, path: String, action: NSNumber, addr: String, port: String, isRegex: Bool = false) {
+func addRule(_ rules: NSMutableDictionary, key: String, path: String, action: NSNumber, addr: String, port: String, endpointType: EndpointType? = nil) {
     let rule = Rule()
     rule.uuid = UUID().uuidString
     rule.key = key
@@ -166,7 +255,7 @@ func addRule(_ rules: NSMutableDictionary, key: String, path: String, action: NS
     rule.action = action
     rule.endpointAddr = addr
     rule.endpointPort = port
-    rule.isEndpointAddrRegex = isRegex
+    rule.isEndpointAddrRegex = NSNumber(value: (endpointType ?? endpointTypeForAddress(addr)).rawValue)
     rule.type = RULE_TYPE_USER
     rule.scope = ACTION_SCOPE_ENDPOINT
     rule.creation = Date()
@@ -297,7 +386,7 @@ func recentBlocks(_ rules: NSDictionary, count: Int = 20) {
     for (key, rule) in shown {
         let date = rule.creation.map { df.string(from: $0) } ?? "unknown"
         let disabled = rule.isDisabled?.boolValue == true ? " [DISABLED]" : ""
-        print("\(date) | \(rule.endpointAddr ?? "*"):\(rule.endpointPort ?? "*") | \(rule.typeString)\(disabled)")
+        print("\(date) | \(rule.endpointAddr ?? "*"):\(rule.endpointPort ?? "*") | \(rule.typeString)\(rule.matchTypeLabel)\(disabled)")
         print("  key=\(key) uuid=\(rule.uuid ?? "?")")
         if let p = rule.path, p != key {
             print("  path=\(p)")
@@ -340,6 +429,8 @@ func usage() {
       recent [N]                          Show N most recent block rules (default 20)
       add --key KEY --path PATH --action allow|block --addr ADDR --port PORT
                                           Add a rule
+      add ... --regex|--cidr|--glob        Force the addr match type (otherwise
+                                          auto-detected from ADDR)
       delete --key KEY [--uuid UUID]      Delete rule by key and optional UUID
       delete-match --key KEY [--action allow|block] [--addr ADDR] [--port PORT]
                                           Delete rules matching criteria
@@ -379,7 +470,7 @@ case "recent":
 
 case "add":
     var key: String?, path: String?, actionStr: String?, addr = "*", port = "*"
-    var isRegex = false
+    var endpointType: EndpointType?
     var i = 2
     while i < args.count {
         switch args[i] {
@@ -388,7 +479,9 @@ case "add":
         case "--action": i += 1; actionStr = args[i]
         case "--addr": i += 1; addr = args[i]
         case "--port": i += 1; port = args[i]
-        case "--regex": isRegex = true
+        case "--regex": endpointType = .regex
+        case "--cidr": endpointType = .cidr
+        case "--glob": endpointType = .glob
         default: break
         }
         i += 1
@@ -398,7 +491,7 @@ case "add":
     }
     let actionNum: NSNumber = (a == "allow") ? RULE_STATE_ALLOW : RULE_STATE_BLOCK
     guard let rules = loadRules() else { exit(1) }
-    addRule(rules, key: k, path: p, action: actionNum, addr: addr, port: port, isRegex: isRegex)
+    addRule(rules, key: k, path: p, action: actionNum, addr: addr, port: port, endpointType: endpointType)
     if saveRules(rules) { print("Saved. Run 'lulu-rules reload' to apply.") }
     else { exit(1) }
 

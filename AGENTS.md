@@ -40,6 +40,12 @@ No automated tests currently. The CLI operates on a system plist owned by root, 
 
 - The `Rule` class mirrors LuLu's Objective-C `Rule.m` with NSSecureCoding.
 - Rules are stored in an NSKeyedArchiver binary plist at `/Library/Objective-See/LuLu/rules.plist`.
+- `isEndpointAddrRegex` is LuLu's `EndpointType` (exact=0, regex=1, cidr=2, glob=3). Its archived
+  format changed across LuLu releases (inline bool in <=4.4.x, inline integer in 4.5.0, `NSNumber`
+  object in >=4.5.1). Decode it with `decodeObject(of: NSNumber.self, ...)` — never
+  `decodeBool`/`decodeInteger`, which throw on another version's format and abort the *entire*
+  load (losing all rules). When the key is absent, derive the type from the address via
+  `endpointTypeForAddress`. Always encode it as an object.
 - The LuLu system extension only reads rules at startup -- `reload` kills it so macOS auto-restarts it.
 - Always run `reload` after write operations.
 

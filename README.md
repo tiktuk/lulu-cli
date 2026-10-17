@@ -81,9 +81,13 @@ Add a new firewall rule.
 | `--key KEY` | Signing identity or `*` for global | required |
 | `--path PATH` | Binary path or `*` for global | required |
 | `--action allow\|block` | Rule action | required |
-| `--addr ADDR` | Domain, IP, or regex | `*` |
+| `--addr ADDR` | Domain, IP, CIDR range, glob, or regex | `*` |
 | `--port PORT` | Port number or `*` | `*` |
-| `--regex` | Treat addr as regex | off |
+| `--regex` | Force addr to be treated as a regex | auto-detected |
+| `--cidr` | Force addr to be treated as a CIDR/IP range | auto-detected |
+| `--glob` | Force addr to be treated as a glob (`*` wildcards) | auto-detected |
+
+The address match type (exact, regex, CIDR, or glob) is auto-detected from `--addr` the same way LuLu does it. Use `--regex`, `--cidr`, or `--glob` to override. The detected type is shown as `[REGEX]`, `[CIDR]`, or `[GLOB]` in `list` and `recent` output.
 
 ```bash
 # Allow a domain globally
@@ -92,6 +96,9 @@ sudo lulu-cli add --key '*' --path '*' --action allow --addr example.com --port 
 # Allow domain + all subdomains (regex)
 sudo lulu-cli add --key '*' --path '*' --action allow \
   --addr '^(.+\.)?example\.com$' --port '*' --regex
+
+# Allow a CIDR range
+sudo lulu-cli add --key '*' --path '*' --action allow --addr 203.0.113.0/24 --port '*'
 
 # Allow for a specific app only
 sudo lulu-cli add --key "/usr/bin/curl" --path /usr/bin/curl \
@@ -143,6 +150,8 @@ lulu-cli help
 LuLu stores rules in `/Library/Objective-See/LuLu/rules.plist` using NSKeyedArchiver binary format. This CLI reads and writes that file directly, using the same serialization format as LuLu's Objective-C codebase.
 
 The LuLu system extension only loads rules at startup. After changes, `reload` kills the extension process and macOS auto-restarts it (takes ~8 seconds). There's a brief gap in filtering during the restart.
+
+The archived format of a rule's endpoint match type has changed across LuLu releases (`<= 4.4.x` stored an inline boolean, `4.5.0` an inline integer, and `>= 4.5.1` an `NSNumber` object). The CLI reads it as an object and derives the type from the address when it's absent, so it can read files written by any LuLu version; it always writes the current object format.
 
 ## Using with AI Agents
 

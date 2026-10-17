@@ -96,9 +96,9 @@ Add a new firewall rule. Requires sudo.
 - `--key KEY` -- signing identity (e.g. `com.apple.curl`) or `*` for global
 - `--path PATH` -- binary path or `*` for global
 - `--action allow|block` -- rule action
-- `--addr ADDR` -- domain, IP, or regex pattern (default: `*`)
+- `--addr ADDR` -- domain, IP, CIDR range, glob, or regex pattern (default: `*`)
 - `--port PORT` -- port number or `*` for any (default: `*`)
-- `--regex` -- treat `--addr` as a regex pattern
+- `--regex` / `--cidr` / `--glob` -- force the `--addr` match type (otherwise auto-detected)
 
 ```bash
 # Allow a domain globally (all apps)
@@ -107,6 +107,9 @@ sudo lulu-cli add --key '*' --path '*' --action allow --addr example.com --port 
 # Allow a domain and all subdomains (regex)
 sudo lulu-cli add --key '*' --path '*' --action allow \
   --addr '^(.+\.)?example\.com$' --port '*' --regex
+
+# Allow a CIDR range
+sudo lulu-cli add --key '*' --path '*' --action allow --addr 203.0.113.0/24 --port '*'
 
 # Allow for a specific app only
 sudo lulu-cli add --key "/usr/bin/curl" --path /usr/bin/curl \
@@ -184,7 +187,7 @@ lulu-cli help
 
 - **key**: Signing identity (e.g. `com.apple.curl`) or binary path for unsigned apps. Use `*` for global rules that apply to all apps.
 - **action**: `allow` or `block`
-- **addr**: Domain name, IP address, regex pattern, or `*` (any)
+- **addr**: Domain name, IP address, CIDR range, glob, regex pattern, or `*` (any). The match type is auto-detected; shown as `[REGEX]`, `[CIDR]`, or `[GLOB]` in `list`/`recent` output.
 - **port**: Port number or `*` (any)
 - **type**: `default` (system), `apple`, `user` (manually created), `passive` (auto-created from blocked connections)
 - **Global rules**: key=`*` and path=`*` apply to all applications

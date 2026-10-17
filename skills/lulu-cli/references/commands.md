@@ -39,9 +39,13 @@ Add a new firewall rule.
 - `--action allow|block` - the rule action
 
 **Optional flags:**
-- `--addr ADDR` - domain, IP, or regex pattern. Default: `*` (any)
+- `--addr ADDR` - domain, IP, CIDR range, glob, or regex pattern. Default: `*` (any)
 - `--port PORT` - port number or `*` for any. Default: `*`
-- `--regex` - treat `--addr` value as a regular expression
+- `--regex` - force `--addr` to be treated as a regular expression
+- `--cidr` - force `--addr` to be treated as a CIDR range or IP range
+- `--glob` - force `--addr` to be treated as a glob (`*` wildcards)
+
+The `--addr` match type (exact, regex, CIDR, or glob) is auto-detected from the value, the same way LuLu does it. Use `--regex`/`--cidr`/`--glob` to override. The detected type is shown as `[REGEX]`, `[CIDR]`, or `[GLOB]` in `list`/`recent` output.
 
 **Requires sudo.** Run `reload` after.
 
@@ -53,6 +57,9 @@ sudo lulu-cli add --key '*' --path '*' --action allow --addr example.com --port 
 # Allow domain + all subdomains via regex
 sudo lulu-cli add --key '*' --path '*' --action allow \
   --addr '^(.+\.)?example\.com$' --port '*' --regex
+
+# Allow a CIDR range
+sudo lulu-cli add --key '*' --path '*' --action allow --addr 203.0.113.0/24 --port '*'
 
 # Allow for a specific binary only
 sudo lulu-cli add --key "/usr/bin/curl" --path /usr/bin/curl \
